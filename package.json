@@ -1,0 +1,19 @@
+{
+  "name": "deal-evaluation",
+  "version": "1.0.0",
+  "description": "Cedar Creek Deal Screen: mineral/royalty package financeability screen",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node test/e2e.js",
+    "deploy": "bash scripts/deploy.sh"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "pagecrypt": "^7.1.0"
+  },
+  "private": true
+}
