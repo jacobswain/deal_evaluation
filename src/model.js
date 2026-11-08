@@ -63,6 +63,9 @@
       { upTo: 1.00, margin: 0.0350 }
     ],
     unusedFee: 0.005,
+    sweepPct: 0.50, // share of cash after interest + G&A swept to RBL principal
+    maturityYears: 4, // remaining balance repaid at maturity
+    ladderRates: [0, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20, 0.25],
     // Scorecard
     tests: [
       { key: 'pdpPV', label: 'PDP share of PV10', dir: 'hi', pass: 0.65, warn: 0.45, w: 20, fmt: 'pct' },
@@ -196,8 +199,9 @@
 
   /** PV of monthly cash flows at an annual effective rate, mid-month convention. */
   function pvMonthly(rate, cf) {
-    let v = 0;
-    for (let i = 0; i < cf.length; i++) if (cf[i]) v += cf[i] * Math.pow(1 + rate, -(i + 0.5) / 12);
+    const step = Math.pow(1 + rate, -1 / 12);
+    let df = Math.pow(1 + rate, -0.5 / 12), v = 0;
+    for (let i = 0; i < cf.length; i++) { if (cf[i]) v += cf[i] * df; df *= step; }
     return v;
   }
 
@@ -208,7 +212,7 @@
     let lo = -0.95, hi = 20;
     if (f(lo) < 0) return null; // can't recover price even at -95%
     if (f(hi) > 0) return hi;
-    for (let k = 0; k < 120; k++) {
+    for (let k = 0; k < 64 && hi - lo > 1e-9; k++) {
       const mid = (lo + hi) / 2;
       if (f(mid) > 0) lo = mid; else hi = mid;
     }
@@ -471,12 +475,12 @@
     }
     if (s >= A.verdictBorderline) {
       const why = over && s >= A.verdictFinanceable
-        ? `Scores ${fmtP(s)}, but the ask is ${fmtMoney(x.ask - x.maxBid)} above max bid, so it is capped at Borderline.`
-        : `Scores ${fmtP(s)}${weak ? `; weakest on ${weak}` : ''}${over ? `, and the ask is ${fmtMoney(x.ask - x.maxBid)} above max bid` : ''}.`;
+        ? `Scores ${fmtP(s)}, but your price is ${fmtMoney(x.ask - x.maxBid)} above max bid, so it is capped at Borderline.`
+        : `Scores ${fmtP(s)}${weak ? `; weakest on ${weak}` : ''}${over ? `, and your price is ${fmtMoney(x.ask - x.maxBid)} above max bid` : ''}.`;
       return { verdict: 'Borderline', tone: 'warn', reason: why };
     }
     return { verdict: 'Pass', tone: 'bad',
-      reason: `Scores only ${fmtP(s)}${weak ? `; fails on ${weak}` : ''}${over ? `, and the ask is ${fmtMoney(x.ask - x.maxBid)} above max bid` : ''}.` };
+      reason: `Scores only ${fmtP(s)}${weak ? `; fails on ${weak}` : ''}${over ? `, and your price is ${fmtMoney(x.ask - x.maxBid)} above max bid` : ''}.` };
   }
 
   /** Value a scenario run (used for base case and sensitivities). */
@@ -573,6 +577,7 @@
     };
     const score = scorecard(vals, A);
     const verdict = verdictOf({ score, pdpSharePV, ask: ask || 0, maxBid: v.maxBid, rblCov: metrics.rblCov }, A);
+    const lev = leveredCase(s.total, price, bb.base, A);
 
     // Annual rollup (model years)
     const annual = [];
@@ -593,9 +598,113 @@
     }
 
     return {
-      A, R, cal, streams: s, deck, valuation: v, pvTable, pvCurve, metrics, bb, stack, score, verdict, annual,
+      A, R, cal, streams: s, deck, valuation: v, pvTable, pvCurve, metrics, bb, stack, lev, vals, score, verdict, annual,
       notes: cal.notes.slice()
     };
+  }
+
+  /**
+   * Levered equity case for a purchase price. RBL draw at close = min(target × base, price);
+   * interest on the drawn balance (margin by utilization), unused fee on the undrawn base,
+   * G&A, then sweepPct of what is left goes to principal; any balance is repaid at maturity.
+   */
+  function leveredCase(cf, price, base, A) {
+    const draw = Math.max(0, Math.min(base * A.targetDraw, price));
+    const equity = price - draw;
+    const n = cf.length, eq = new Array(n).fill(0);
+    const matM = Math.max(1, Math.round((A.maturityYears || 4) * 12));
+    let bal = draw, int12 = 0, cash12 = 0;
+    for (let i = 0; i < n; i++) {
+      const util = base > 0 ? bal / base : 0;
+      const rate = A.sofr + marginFor(util, A.grid);
+      const interest = bal * rate / 12 + Math.max(0, base - bal) * A.unusedFee / 12 * (i < matM ? 1 : 0);
+      const fcf = cf[i] - interest - (i < matM ? A.gaAnnual / 12 : 0); // G&A while the RBL is outstanding
+      let principal = bal > 0 ? Math.min(bal, Math.max(0, fcf * A.sweepPct)) : 0;
+      if (i === matM - 1) principal = bal; // balloon at maturity
+      bal -= principal;
+      eq[i] = fcf - principal;
+      if (i < 12) { int12 += interest; cash12 += fcf; }
+    }
+    const lev = equity > 1 ? impliedRate(eq, equity) : null;
+    let cum = 0, eqPayback = null;
+    for (let i = 0; i < n; i++) { cum += eq[i]; if (cum >= equity) { eqPayback = i + 1; break; } }
+    return {
+      price, draw, equity, ltv: price > 0 ? draw / price : 0,
+      interestY1: int12,
+      leveredYieldY1: equity > 1 ? cash12 / equity : null, // cash after interest + G&A, before paydown
+      distY1: sum(eq, 12), // cash actually distributed after the sweep
+      leveredIRR: lev, fullyFinanced: equity <= 1, eqPayback, equityFlows: eq
+    };
+  }
+
+  /** Bid ladder: price at each PV rate and what it earns unlevered and levered. */
+  function bidLadder(r, deal, A, basis) {
+    A = Object.assign({}, DEFAULT_ASSUMPTIONS, A || {});
+    const s = r.streams;
+    const cf = basis === 'pdp' ? s.pdp.net : s.total;
+    const ntm = sum(s.total, 12);
+    return (A.ladderRates || DEFAULT_ASSUMPTIONS.ladderRates).map((rate) => {
+      const price = pvMonthly(rate, cf);
+      const lev = leveredCase(s.total, price, r.bb.base, A);
+      const vals = Object.assign({}, r.vals, { yield: price > 0 ? ntm / price : null, rblCov: price > 0 ? r.bb.base / price : null, size: price });
+      const score = scorecard(vals, A);
+      const verdict = verdictOf({ score, pdpSharePV: r.metrics.pdpSharePV, ask: price, maxBid: r.metrics.maxBid, rblCov: vals.rblCov }, A);
+      return {
+        rate, price,
+        vsMaxBid: price - r.metrics.maxBid,
+        yieldY1: price > 0 ? ntm / price : null,
+        unleveredIRR: impliedRate(s.total, price),
+        payback: paybackMonths(s.total, price),
+        multiple: ntm > 0 ? price / ntm : null,
+        lev, score: score.score, verdict: verdict.verdict, tone: verdict.tone
+      };
+    });
+  }
+
+  /**
+   * Scenario matrix: bid set at PV(rate) of the strip case, outcome under other price cases.
+   * Volumes and the closing borrowing base stay at the base case.
+   */
+  function scenarioMatrix(r, deal, A, basis, mults) {
+    A = Object.assign({}, DEFAULT_ASSUMPTIONS, A || {});
+    mults = mults || [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3];
+    const baseCF = basis === 'pdp' ? r.streams.pdp.net : r.streams.total;
+    const cases = mults.map((m) => {
+      const sc = m === 1 ? r.streams : buildStreams(r.R, A, r.cal.qPDP, r.cal.qPDNP, { priceMult: m });
+      return { mult: m, cf: sc.total, ntm: sum(sc.total, 12) };
+    });
+    const rates = A.ladderRates || DEFAULT_ASSUMPTIONS.ladderRates;
+    return {
+      mults, rates,
+      rows: rates.map((rate) => {
+        const price = pvMonthly(rate, baseCF);
+        return {
+          rate, price,
+          cells: cases.map((c) => {
+            const lev = leveredCase(c.cf, price, r.bb.base, A);
+            return {
+              mult: c.mult,
+              unleveredIRR: impliedRate(c.cf, price),
+              yieldY1: price > 0 ? c.ntm / price : null,
+              leveredIRR: lev.fullyFinanced ? null : lev.leveredIRR,
+              leveredYieldY1: lev.leveredYieldY1
+            };
+          })
+        };
+      })
+    };
+  }
+
+  /** Price that delivers a target levered IRR (bisection on price). */
+  function bidForLeveredIRR(r, A, target) {
+    A = Object.assign({}, DEFAULT_ASSUMPTIONS, A || {});
+    const cf = r.streams.total;
+    const f = (p) => { const l = leveredCase(cf, p, r.bb.base, A); return l.fullyFinanced ? Infinity : l.leveredIRR; };
+    let lo = Math.max(1, r.bb.base * A.targetDraw * 1.0001), hi = pvMonthly(-0.5, cf);
+    if (!(hi > lo) || f(lo) < target) return null;
+    if (f(hi) > target) return hi;
+    for (let k = 0; k < 70; k++) { const mid = (lo + hi) / 2; if (f(mid) >= target) lo = mid; else hi = mid; }
+    return (lo + hi) / 2;
   }
 
   /** Sensitivity grid: strip multiplier × decline delta → max bid & NTM yield at a fixed price. */
@@ -643,7 +752,7 @@
     MONTHS, DISCOUNT_RATES, DEFAULT_ASSUMPTIONS, DEFAULT_DEAL,
     nominalFromEffective, arps, monthlyVolumes, npv, irr, pvMonthly, impliedRate, paybackMonths,
     priceDeck, mixOf, streamCashFlow, resolve, calibrate, buildStreams, fitDecline,
-    borrowingBase, rblStack, marginFor, scorecard, scoreTest, verdictOf, analyze, sensitivity,
+    borrowingBase, rblStack, marginFor, leveredCase, bidLadder, bidForLeveredIRR, scenarioMatrix, scorecard, scoreTest, verdictOf, analyze, sensitivity,
     fmtMoney, fmtPct, fmtNum, fmtYrs, fmtX, fmtBoe, sum
   };
   root.DSModel = api;

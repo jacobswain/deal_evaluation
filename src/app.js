@@ -62,8 +62,9 @@
     { g: 'RBL borrowing base', grid: true, keys: [
       ['deckOil', 'Bank deck, oil (% of strip)', 'pct'], ['deckGas', 'Bank deck, gas (% of strip)', 'pct'], ['bbRate', 'Reserves discount rate', 'pct'],
       ['advPDP', 'Advance rate, PDP', 'pct'], ['advPDNP', 'Advance rate, PDNP', 'pct'], ['advPUD', 'Advance rate, PUD', 'pct'],
-      ['maxLeverage', 'Max leverage (x NTM EBITDA)', 'num', 2], ['gaAnnual', 'G&A ($/yr)', 'usd', 0], ['targetDraw', 'Target draw (% of base)', 'pct'],
-      ['sofr', 'SOFR', 'pct', 2], ['unusedFee', 'Unused fee', 'pct', 2]] },
+      ['maxLeverage', 'Max leverage (x NTM EBITDA)', 'num', 2], ['gaAnnual', 'G&A ($/yr, while RBL is outstanding)', 'usd', 0], ['targetDraw', 'Target draw (% of base)', 'pct'],
+      ['sofr', 'SOFR', 'pct', 2], ['unusedFee', 'Unused fee', 'pct', 2],
+      ['sweepPct', 'Cash sweep to principal', 'pct'], ['maturityYears', 'RBL maturity (years)', 'num', 1]] },
     { g: 'Scorecard', tests: true, keys: [
       ['verdictFinanceable', 'Financeable at score ≥', 'pct', 0], ['verdictBorderline', 'Borderline at score ≥', 'pct', 0],
       ['verdictDevStory', 'Development story if PDP share of PV10 <', 'pct', 0]] }
@@ -78,7 +79,7 @@
     edited: {},
     text: '',
     view: 'ingest', leftTab: 'ingest',
-    cfRange: 120, logProd: false, heat: 'maxBid',
+    cfRange: 120, logProd: false, heat: 'maxBid', basis: 'total', scen: 'leveredIRR', targetLev: 0.15,
     result: null, sens: null,
     currentId: null
   };
@@ -88,12 +89,15 @@
   if (ui.view) { S.view = ui.view; S.leftTab = ui.leftTab || 'ingest'; }
   if (ui.cfRange) S.cfRange = ui.cfRange;
   if (ui.heat) S.heat = ui.heat;
+  if (ui.basis) S.basis = ui.basis;
+  if (ui.scen) S.scen = ui.scen;
+  if (ui.targetLev) S.targetLev = ui.targetLev;
   S.logProd = !!ui.logProd;
 
   const persist = () => {
     store.set(LS.cur, { deal: S.deal, parsed: S.parsed, edited: S.edited, text: S.text, id: S.currentId });
     store.set(LS.A, S.A);
-    store.set(LS.ui, { view: S.view, leftTab: S.leftTab, cfRange: S.cfRange, logProd: S.logProd, heat: S.heat });
+    store.set(LS.ui, { view: S.view, leftTab: S.leftTab, cfRange: S.cfRange, logProd: S.logProd, heat: S.heat, basis: S.basis, scen: S.scen, targetLev: S.targetLev });
   };
 
   // ---------- value parsing / display ----------
@@ -120,12 +124,14 @@
 
   // ---------- recompute & render ----------
   let raf = 0;
-  function schedule() { cancelAnimationFrame(raf); raf = requestAnimationFrame(recompute); }
+  function schedule() { clearTimeout(raf); raf = setTimeout(recompute, 70); }
   function recompute() {
     const deal = Object.assign({}, S.deal);
     // Feed numeric deal fields as numbers to the model
     S.result = M.analyze(deal, S.A);
     S.sens = M.sensitivity(deal, S.A, S.result);
+    S.ladder = M.bidLadder(S.result, deal, S.A, S.basis);
+    S.matrix = M.scenarioMatrix(S.result, deal, S.A, S.basis);
     persist();
     renderHero();
     renderAnalysis();
@@ -151,12 +157,12 @@
     const over = m.ask && m.ask > m.maxBid;
     const tiles = [
       ['Max bid', fmtMoney(m.maxBid), ok ? `${fmtX(m.maxBid / (m.ntmTotal || NaN))} NTM` : '', 'hl'],
-      ['Ask', m.ask ? fmtMoney(m.ask) : '—', m.ask ? (over ? `${fmtMoney(m.ask - m.maxBid)} over bid` : `${fmtMoney(m.maxBid - m.ask)} under bid`) : 'blank → max bid', over ? 'neg' : ''],
+      ['Your bid', fmtMoney(m.price), (m.irrTotal !== null ? `≈ PV${(m.irrTotal * 100).toFixed(1)} · ` : '') + (m.ask ? (over ? `${fmtMoney(m.ask - m.maxBid)} over max` : `${fmtMoney(m.maxBid - m.ask)} under max`) : 'using max bid'), over ? 'neg' : ''],
       ['NTM yield', fmtPct(m.yieldNTM), `PDP-only ${fmtPct(m.yieldPDP)}`],
       ['Implied PV rate', fmtPct(m.irrTotal), `PDP-only ${fmtPct(m.irrPDP)}`],
       ['Borrowing base', fmtMoney(r.bb.base), `${r.bb.binding} test binds`],
       ['Equity check', fmtMoney(r.stack.equity), `RBL draw ${fmtMoney(r.stack.draw)}`],
-      ['Payback', m.payback ? `${Math.round(m.payback)} mo` : '—', m.payback ? fmtYrs(m.payback / 12) : '']
+      ['Levered IRR', r.lev.fullyFinanced ? 'n/m' : fmtPct(r.lev.leveredIRR), `Yr-1 equity yield ${fmtPct(r.lev.leveredYieldY1)}`]
     ];
     $('#kpis').innerHTML = tiles.map(([k, val, s, cls]) =>
       `<div class="kpi ${cls === 'hl' ? 'hl' : ''}"><div class="k">${k}</div><div class="v ${cls === 'neg' ? 'neg' : ''}">${ok ? val : '—'}</div><div class="s">${ok ? esc(s) : '&nbsp;'}</div></div>`).join('');
@@ -291,7 +297,7 @@
     if (S.parsed && missing.length) h += `<div class="flag">⚠ Missing: ${missing.map((k) => labelOf(k)).join(', ')}. Defaults are used where needed; type a value to override.</div>`;
     h += `<div id="calNotes">${notes.map((n) => `<div class="flag info">${esc(n)}</div>`).join('')}</div>`;
     h += `<div class="section-title">Model controls</div>
-      ${row('ask', 'Asking price', 'money', 'Blank = use max bid')}
+      ${row('ask', 'Your bid (or seller ask)', 'money', 'Blank = use max bid. Click a row in the Bid ladder to set it.')}
       ${selRow('calibMode', 'Volumes from', [['auto', 'Auto'], ['ntm', 'Back-solve from NTM CF'], ['production', 'Stated production']])}
       ${row('pdnpOnline', 'PDNP online month', 'num', 'Month 1 = next month')}
       ${row('pdnpRisk', 'PDNP risk (realization)', 'pct')}
@@ -529,7 +535,13 @@
   function analysisSkeleton() {
     $('#analysis').innerHTML = `
       <div class="card wide" id="cardSummary"></div>
-      <div class="card"><h3>Returns at ask</h3><div id="returns"></div></div>
+      <div class="card wide"><h3>Bid ladder · what you pay at each PV rate, and what you earn<span class="sp"></span><span class="seg" id="basisTog"><button data-b="total">PDP + PDNP</button><button data-b="pdp">PDP only</button></span></h3>
+        <div id="ladderLead" class="lead"></div><div class="tscroll" id="ladder"></div>
+        <div class="row solver"><span class="small muted">Bid that earns a</span><input id="targetLev" class="num" type="text" inputmode="decimal" style="width:70px"><span class="small muted">levered IRR:</span><b class="mono" id="solveOut">—</b><button class="btn sm" id="solveUse">Use as bid</button></div>
+        <div class="foot" id="ladderFoot"></div></div>
+      <div class="card wide"><h3>Scenarios · bid at strip PV, outcome if prices move<span class="sp"></span><span class="seg" id="scenTog"><button data-s="leveredIRR">Levered IRR</button><button data-s="unleveredIRR">Unlevered</button><button data-s="yieldY1">Yr-1 yield</button><button data-s="leveredYieldY1">Equity CoC</button></span></h3>
+        <div class="tscroll" id="matrix"></div><div class="foot" id="matrixFoot"></div></div>
+      <div class="card"><h3>Unlevered returns at your bid</h3><div id="returns"></div></div>
       <div class="card"><h3>RBL borrowing base</h3><div id="rbl"></div></div>
       <div class="card wide"><h3>Monthly net cash flow<span class="sp"></span><span class="seg" id="cfRange"><button data-r="60">5y</button><button data-r="120">10y</button><button data-r="360">30y</button></span></h3><div class="chart-box tall"><canvas id="chCF"></canvas></div></div>
       <div class="card"><h3>Production (Boe/d)<span class="sp"></span><span class="seg" id="logTog"><button data-l="0">Linear</button><button data-l="1">Log</button></span></h3><div class="chart-box"><canvas id="chProd"></canvas></div></div>
@@ -543,6 +555,13 @@
     $$('#cfRange button').forEach((b) => (b.onclick = () => { S.cfRange = +b.dataset.r; renderAnalysis(); persist(); }));
     $$('#logTog button').forEach((b) => (b.onclick = () => { S.logProd = b.dataset.l === '1'; renderAnalysis(); persist(); }));
     $$('#heatTog button').forEach((b) => (b.onclick = () => { S.heat = b.dataset.h; renderAnalysis(); persist(); }));
+    $$('#basisTog button').forEach((b) => (b.onclick = () => { S.basis = b.dataset.b; recompute(); }));
+    $$('#scenTog button').forEach((b) => (b.onclick = () => { S.scen = b.dataset.s; renderMatrix(); persist(); }));
+    const tl = $('#targetLev');
+    tl.value = show('pct', S.targetLev);
+    tl.oninput = () => { const v = parseInput('pct', tl.value); if (v !== null) { S.targetLev = v; renderSolver(); persist(); } };
+    tl.onblur = () => { tl.value = show('pct', S.targetLev); };
+    $('#solveUse').onclick = () => { if (S.solved) setBid(S.solved); };
   }
 
   function renderAnalysis() {
@@ -556,11 +575,18 @@
     const sum = $('#cardSummary');
     if (!$('#askMain')) {
       sum.innerHTML = `<div class="ask-row" style="flex-wrap:wrap;gap:14px">
-        <div><div class="small muted" style="margin-bottom:4px">ASKING PRICE</div><input id="askMain" class="num" type="text" inputmode="decimal" placeholder="blank = max bid"></div>
+        <div><div class="small muted" style="margin-bottom:4px">YOUR BID <span style="color:var(--dim)">(or seller's ask)</span></div><input id="askMain" class="num" type="text" inputmode="decimal" placeholder="blank = max bid">
+          <div class="row quick" style="margin-top:6px"><button class="btn sm" data-q="0.10">PV10</button><button class="btn sm" data-q="0.12">PV12</button><button class="btn sm" data-q="0.15">PV15</button><button class="btn sm" data-q="max">Max bid</button><button class="btn sm ghost" data-q="clear">Clear</button></div></div>
         <div id="sumLine" class="small" style="flex:1;min-width:220px;color:var(--muted)"></div></div>`;
       const a = $('#askMain');
       a.oninput = () => { S.deal.ask = parseInput('money', a.value); S.edited.ask = true; schedule(); const ra = $('#paneReview [data-k="ask"]'); if (ra) ra.value = a.value; };
       a.onblur = () => { a.value = show('money', S.deal.ask); };
+      $$('#cardSummary [data-q]').forEach((b) => (b.onclick = () => {
+        const q = b.dataset.q, r0 = S.result;
+        if (q === 'clear') setBid(null);
+        else if (q === 'max') setBid(r0.metrics.maxBid);
+        else setBid(M.pvMonthly(+q, S.basis === 'pdp' ? r0.streams.pdp.net : r0.streams.total));
+      }));
     }
     const a = $('#askMain');
     if (document.activeElement !== a) a.value = show('money', S.deal.ask);
@@ -571,7 +597,7 @@
 
     // Returns
     $('#returns').innerHTML = kv([
-      ['Price used', (m.ask ? 'Ask ' : 'Max bid ') + fmtMoney(m.price), true],
+      ['Price used', (m.ask ? 'Your bid ' : 'Max bid ') + fmtMoney(m.price), true],
       ['NTM cash flow (risked)', fmtMoney(m.ntmTotal)],
       ['NTM cash yield', fmtPct(m.yieldNTM), true],
       ['PDP-only yield', fmtPct(m.yieldPDP)],
@@ -597,6 +623,8 @@
       ['All-in rate', fmtPct(st.rate, 2)],
       ['Year-1 interest + fees', fmtMoney(st.interest)],
       ['Equity check', fmtMoney(st.equity), true],
+      ['Loan-to-price', fmtPct(r.lev.ltv, 0)],
+      ['Levered IRR (' + fmtPct(S.A.sweepPct, 0) + ' sweep, ' + S.A.maturityYears + '-yr term)', r.lev.fullyFinanced ? 'n/m' : fmtPct(r.lev.leveredIRR), true],
       ['Levered cash-on-cash', fmtPct(st.leveredCoC)],
       ['DSCR (EBITDA / interest)', fmtX(st.dscr)],
       ['Debt / EBITDA', fmtX(st.debtEbitda)]
@@ -620,12 +648,81 @@
         ${S.deal.pvPDP ? `<div>Teaser PDP PV10 vs modeled</div><div>${fmtMoney(S.deal.pvPDP)} vs ${fmtMoney(v.pdpPV10m)}</div>` : ''}
       </div>`;
 
+    renderLadder();
+    renderMatrix();
     renderCharts();
     renderHeat();
     renderAnnual();
   }
   function fmtTest(t, v) { return t.fmt === 'pct' ? fmtPct(v, 0) : t.fmt === 'yrs' ? fmtYrs(v) : t.fmt === 'money' ? fmtMoney(v) : String(v ?? '—'); }
   function kv(rows) { return `<div class="kv">${rows.map(([k, v, em]) => `<div>${esc(k)}</div><div class="${em ? 'em' : ''}">${v}</div>`).join('')}</div>`; }
+
+  // ---------- bid ladder & scenarios ----------
+  function setBid(v) {
+    S.deal.ask = v === null ? null : Math.round(v / 1e4) * 1e4;
+    S.edited.ask = true;
+    const a = $('#askMain'); if (a) a.value = show('money', S.deal.ask);
+    const ra = $('#paneReview [data-k="ask"]'); if (ra) ra.value = show('money', S.deal.ask);
+    recompute();
+  }
+  const pvLbl = (r) => 'PV' + Math.round(r * 100);
+  const levTxt = (l) => (l.fullyFinanced ? 'n/m' : fmtPct(l.leveredIRR));
+  function renderLadder() {
+    const L = S.ladder, r = S.result, m = r.metrics;
+    $$('#basisTog button').forEach((b) => b.classList.toggle('on', b.dataset.b === S.basis));
+    if (!hasData()) { $('#ladder').innerHTML = '<div class="empty">Ingest a teaser to see the bid ladder.</div>'; $('#ladderLead').textContent = ''; $('#ladderFoot').textContent = ''; renderSolver(); return; }
+    const near = (x) => Math.abs(x.price - m.price) <= Math.max(1e4, m.price * 0.004);
+    const sel = L.find(near) || L.find((x) => Math.abs(x.rate - 0.10) < 1e-9);
+    const x = sel, l = x.lev;
+    $('#ladderLead').innerHTML = `At <b>${pvLbl(x.rate)}</b> you'd bid <b class="mono">${fmtMoney(x.price)}</b>: a <b>${fmtPct(x.unleveredIRR)}</b> unlevered return and <b>${fmtPct(x.yieldY1)}</b> year-1 cash yield.
+      The RBL lends <b class="mono">${fmtMoney(l.draw)}</b> (${fmtPct(l.ltv, 0)} of price), so your equity is <b class="mono">${fmtMoney(l.equity)}</b>,
+      earning <b>${fmtPct(l.leveredYieldY1)}</b> cash-on-cash in year 1 and a <b>${levTxt(l)}</b> levered IRR. Verdict at that price: <b>${esc(x.verdict)}</b>.`;
+    const tone = { good: 'pass', warn: 'warn', bad: 'fail', dev: 'dev' };
+    $('#ladder').innerHTML = `<table class="t ladder"><thead><tr><th>Bid at</th><th>Price</th><th class="hm">vs max bid</th><th>Yr-1 yield</th><th class="hm">Payback</th><th class="hm">RBL debt</th><th>Equity</th><th class="hm">Equity CoC yr 1</th><th>Lev. IRR</th><th class="hm">Verdict</th></tr></thead><tbody>
+      ${L.map((x) => `<tr class="pick ${near(x) ? 'sel' : ''}" data-price="${x.price}" title="Click to bid ${fmtMoney(x.price)}"><td class="txt"><b>${pvLbl(x.rate)}</b></td><td><b>${fmtMoney(x.price)}</b></td>
+        <td class="hm" style="color:${x.vsMaxBid > 0 ? 'var(--red)' : 'var(--accent)'}">${x.vsMaxBid > 0 ? '+' : '−'}${fmtMoney(Math.abs(x.vsMaxBid))}</td>
+        <td>${fmtPct(x.yieldY1)}</td><td class="hm">${x.payback ? Math.round(x.payback) + ' mo' : '—'}</td><td class="hm">${fmtMoney(x.lev.draw)} <span class="muted small">${fmtPct(x.lev.ltv, 0)}</span></td>
+        <td>${fmtMoney(x.lev.equity)}</td><td class="hm">${fmtPct(x.lev.leveredYieldY1)}</td><td><b>${levTxt(x.lev)}</b></td>
+        <td class="txt hm"><span class="pill ${tone[x.tone]}">${esc(x.verdict)}</span></td></tr>`).join('')}
+      </tbody></table>`;
+    $$('#ladder tr.pick').forEach((tr) => (tr.onclick = () => setBid(+tr.dataset.price)));
+    $('#ladderFoot').innerHTML = `Price = PV of ${S.basis === 'pdp' ? 'PDP' : 'PDP + risked PDNP'} cash flow at strip (mid-month), so the unlevered return equals the PV rate. PUD and upside carry no cash flow here, so at these prices they're free optionality.
+      Debt = ${fmtPct(S.A.targetDraw, 0)} of the ${fmtMoney(r.bb.base)} borrowing base, capped at price. Levered IRR: interest at SOFR + grid, G&A ${fmtMoney(S.A.gaAnnual)}/yr while the loan is out, ${fmtPct(S.A.sweepPct, 0)} of remaining cash sweeps principal, balance repaid at year ${S.A.maturityYears}. Click a row to make it your bid.`;
+    renderSolver();
+  }
+  function renderSolver() {
+    const out = $('#solveOut');
+    if (!out) return;
+    if (!hasData()) { out.textContent = '—'; S.solved = null; return; }
+    const p = M.bidForLeveredIRR(S.result, S.A, S.targetLev);
+    S.solved = p;
+    out.innerHTML = p ? `${fmtMoney(p)} <span class="muted small">≈ PV${(M.impliedRate(S.result.streams.total, p) * 100).toFixed(1)}</span>` : 'not reachable';
+    $('#solveUse').disabled = !p;
+  }
+  function renderMatrix() {
+    const X = S.matrix, k = S.scen, r = S.result;
+    $$('#scenTog button').forEach((b) => b.classList.toggle('on', b.dataset.s === k));
+    if (!hasData()) { $('#matrix').innerHTML = '<div class="empty">Ingest a teaser to see scenarios.</div>'; $('#matrixFoot').textContent = ''; return; }
+    const hurdle = k === 'leveredIRR' ? S.targetLev : k === 'unleveredIRR' ? 0.10 : S.A.tests.find((t) => t.key === 'yield').pass;
+    const all = X.rows.flatMap((row) => row.cells.map((c) => c[k])).filter((v) => v !== null && isFinite(v));
+    const lo = Math.min(...all), hi = Math.max(...all);
+    const color = (v) => {
+      if (v === null || !isFinite(v)) return 'transparent';
+      const good = v >= hurdle, span = good ? (hi - hurdle) || 1 : (hurdle - lo) || 1;
+      const a = 0.08 + 0.42 * Math.min(1, Math.abs(v - hurdle) / span);
+      return good ? `rgba(52,211,153,${a})` : `rgba(248,113,113,${a})`;
+    };
+    const m = r.metrics;
+    const wti12 = M.sum(r.streams.prices.oil, 12) / 12;
+    const near = (p) => Math.abs(p - m.price) <= Math.max(1e4, m.price * 0.004);
+    $('#matrix').innerHTML = `<table class="t heat"><thead><tr><th style="text-align:left!important">Bid \\ Prices</th>${X.mults.map((x) => `<th>${x === 1 ? 'Strip' : (x < 1 ? '−' : '+') + Math.round(Math.abs(x - 1) * 100) + '%'}</th>`).join('')}</tr></thead><tbody>
+      ${X.rows.map((row) => `<tr class="${near(row.price) ? 'selrow' : ''}"><th style="text-align:left!important;white-space:nowrap">${pvLbl(row.rate)} <span class="muted small mono">${fmtMoney(row.price)}</span></th>
+        ${row.cells.map((c) => `<td class="${c.mult === 1 && near(row.price) ? 'base' : ''}" style="background:${color(c[k])}">${c[k] === null ? 'n/m' : fmtPct(c[k])}</td>`).join('')}</tr>`).join('')}
+      </tbody></table>`;
+    const label = { leveredIRR: 'levered IRR', unleveredIRR: 'unlevered return', yieldY1: 'year-1 cash yield on price', leveredYieldY1: 'year-1 cash-on-cash on equity' }[k];
+    $('#matrixFoot').innerHTML = `Each row fixes the bid at that PV of the strip case; columns show the ${label} if realized oil and gas prices land at strip ±%. Green = at or above ${fmtPct(hurdle, 0)}${k === 'leveredIRR' ? ' (your target above)' : ''}.
+      Volumes and the closing borrowing base stay at the base case. Next-12-month WTI at strip averages $${wti12.toFixed(2)}, so −20% ≈ $${(wti12 * 0.8).toFixed(0)}.`;
+  }
 
   // ---------- charts ----------
   function baseOpts(extra) {
@@ -789,8 +886,8 @@
       <div class="sub">${esc([S.deal.seller, S.deal.basins, S.deal.counties, S.deal.states].filter(Boolean).join(' · '))}${S.deal.bidDate ? ' · Bids due ' + esc(S.deal.bidDate) : ''} · Cedar Creek Deal Screen · ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</div>
       <div class="vrow"><span class="vb">${esc(r.verdict.verdict)}</span><span><b>${fmtPct(r.score.score, 0)}</b> score · ${esc(r.verdict.reason)}</span></div>
       <div class="grid">
-        ${[['Max bid', fmtMoney(m.maxBid)], ['Ask', m.ask ? fmtMoney(m.ask) : '—'], ['NTM yield', fmtPct(m.yieldNTM)], ['Implied PV rate', fmtPct(m.irrTotal)],
-          ['Borrowing base', fmtMoney(bb.base) + ' (' + bb.binding.toLowerCase() + ')'], ['Equity check', fmtMoney(st.equity)], ['Payback', m.payback ? Math.round(m.payback) + ' mo' : '—'], ['PDP share of PV10', fmtPct(m.pdpSharePV, 0)]]
+        ${[['Max bid', fmtMoney(m.maxBid)], ['Your bid', fmtMoney(m.price)], ['NTM yield', fmtPct(m.yieldNTM)], ['Implied PV rate', fmtPct(m.irrTotal)],
+          ['Borrowing base', fmtMoney(bb.base) + ' (' + bb.binding.toLowerCase() + ')'], ['Equity check', fmtMoney(st.equity)], ['Levered IRR', levTxt(r.lev)], ['PDP share of PV10', fmtPct(m.pdpSharePV, 0)]]
           .map(([k, v]) => `<div><small>${k}</small><b>${v}</b></div>`).join('')}
       </div>
       <div class="cols">
@@ -808,6 +905,8 @@
           </tbody></table>
         </div>
         <div>
+          <h4>Bid ladder</h4><table><thead><tr><th>Bid at</th><th>Price</th><th>Yr-1 yld</th><th>Equity</th><th>Lev IRR</th></tr></thead><tbody>
+          ${(S.ladder || []).map((x) => `<tr><td>${pvLbl(x.rate)}</td><td>${fmtMoney(x.price)}</td><td>${fmtPct(x.yieldY1)}</td><td>${fmtMoney(x.lev.equity)}</td><td>${levTxt(x.lev)}</td></tr>`).join('')}</tbody></table>
           <h4>Scorecard</h4><table><tbody>${r.score.rows.map((t) => `<tr><td>${esc(t.label)}</td><td>${t.dir === 'bool' ? (t.value ? 'yes' : 'no') : fmtTest(t, t.value)}</td><td>${t.status}</td></tr>`).join('')}</tbody></table>
           <h4>Monthly net cash flow</h4>${img('chCF')}
           <h4>Bid build</h4>${img('chWF')}

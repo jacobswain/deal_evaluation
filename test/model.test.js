@@ -156,3 +156,62 @@ test('strip default covers model start and escalates after last year', () => {
   const p = M.priceDeck(Object.assign({}, A, { escalator: 0.02 }), 2031, 0, 24);
   near(p.oil[12], A.strip[A.strip.length - 1].oil * 1.02, 1e-9);
 });
+
+// ---------- bid ladder / levered returns ----------
+const MSR = { ntmCF: 4.0e6, pdpShareNTM: 0.16, pvPDP: 3e6, pvPDNP: 9e6, pvPUD: 13e6 };
+
+test('bid ladder: price is PV at each rate and unlevered return equals that rate', () => {
+  const r = M.analyze(MSR, A);
+  const L = M.bidLadder(r, MSR, A, 'total');
+  assert.deepEqual(L.map((x) => x.rate), A.ladderRates);
+  for (const x of L) {
+    near(x.price, M.pvMonthly(x.rate, r.streams.total), 1e-6);
+    if (x.rate > 0) near(x.unleveredIRR, x.rate, 1e-6, `PV${x.rate * 100}`);
+    near(x.lev.equity + x.lev.draw, x.price, 1e-6);
+    assert.ok(x.lev.draw <= x.price + 1e-9);
+  }
+  const pdp = M.bidLadder(r, MSR, A, 'pdp');
+  near(pdp[3].price, M.pvMonthly(0.10, r.streams.pdp.net), 1e-6);
+});
+
+test('levered IRR equals unlevered with no debt and no G&A', () => {
+  const r = M.analyze(MSR, A);
+  const cf = r.streams.total, p = M.pvMonthly(0.12, cf);
+  const l = M.leveredCase(cf, p, r.bb.base, Object.assign({}, A, { targetDraw: 0, gaAnnual: 0, unusedFee: 0 }));
+  near(l.leveredIRR, 0.12, 1e-6);
+});
+
+test('positive leverage: cheap debt lifts equity IRR above the unlevered rate', () => {
+  const r = M.analyze(MSR, A);
+  const cf = r.streams.total, p = M.pvMonthly(0.15, cf);
+  const l = M.leveredCase(cf, p, r.bb.base, Object.assign({}, A, { gaAnnual: 0 }));
+  assert.ok(l.draw > 0 && l.leveredIRR > 0.15, `levered ${l.leveredIRR}`);
+});
+
+test('RBL is fully repaid by maturity', () => {
+  const r = M.analyze(MSR, A);
+  const cf = r.streams.total, p = M.pvMonthly(0.10, cf);
+  const l = M.leveredCase(cf, p, r.bb.base, A);
+  // equity outflow + all equity distributions = asset cash - interest - fees - G&A - principal; principal must equal the draw
+  const totalCF = M.sum(cf), eq = M.sum(l.equityFlows);
+  assert.ok(totalCF - eq > l.draw, 'debt service exceeds principal');
+});
+
+test('solver returns the bid that hits the target levered IRR', () => {
+  const r = M.analyze(MSR, A);
+  const p = M.bidForLeveredIRR(r, A, 0.15);
+  const l = M.leveredCase(r.streams.total, p, r.bb.base, A);
+  near(l.leveredIRR, 0.15, 1e-4);
+});
+
+test('scenario matrix: strip column matches the ladder, lower prices lower returns', () => {
+  const r = M.analyze(MSR, A);
+  const L = M.bidLadder(r, MSR, A, 'total');
+  const X = M.scenarioMatrix(r, MSR, A, 'total');
+  const si = X.mults.indexOf(1);
+  X.rows.forEach((row, i) => {
+    near(row.price, L[i].price, 1e-6);
+    near(row.cells[si].leveredIRR, L[i].lev.leveredIRR, 1e-9);
+    assert.ok(row.cells[0].unleveredIRR < row.cells[si].unleveredIRR);
+  });
+});

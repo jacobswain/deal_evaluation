@@ -260,6 +260,21 @@ details[open] summary::before { content: '▾ '; }
 .deal-list td { cursor: default; }
 .deal-list .acts { display: flex; gap: 4px; justify-content: flex-end; }
 
+/* ---------- bid ladder ---------- */
+.lead { font-size: 13.5px; line-height: 1.55; color: #c9d3e0; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.lead b { color: var(--text); }
+table.ladder tr.pick { cursor: pointer; }
+table.ladder tr.pick:hover td { background: rgba(52, 211, 153, .06); }
+table.ladder tr.sel td { background: rgba(52, 211, 153, .10); }
+table.ladder tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.pill.dev { color: var(--violet); background: var(--dev-bg); }
+.solver { margin-top: 10px; gap: 8px; }
+.solver input { padding: 4px 6px; }
+.heat tr.selrow th { color: var(--text); }
+.quick .btn { padding: 3px 8px; font-size: 11.5px; }
+.card h3 { flex-wrap: wrap; row-gap: 6px; }
+.heat tbody th:first-child, .heat thead th:first-child { position: sticky; left: 0; background: var(--panel); z-index: 1; }
+
 /* ---------- mobile tabbar ---------- */
 .tabbar { display: none; }
 @media (max-width: 1100px) {
@@ -285,6 +300,8 @@ details[open] summary::before { content: '▾ '; }
   table.t th, table.t td { padding: 6px 5px; }
   table.t td.txt { white-space: normal; }
   .score-t .thr { display: none; }
+  .ladder .hm { display: none; }
+  .card h3 .sp { flex-basis: 100%; height: 0; }
   .card { padding: 12px; }
   .tabbar {
     display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
