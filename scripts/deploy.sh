@@ -42,16 +42,16 @@ fi
 
 if ! gh api "repos/$OWNER/$REPO/pages" >/dev/null 2>&1; then
   echo "▸ Enabling GitHub Pages from $BRANCH"
-  gh api -X POST "repos/$OWNER/$REPO/pages" -f "source[branch]=$BRANCH" -f 'source[path]=/' >/dev/null
+  gh api -X POST "repos/$OWNER/$REPO/pages" -f "source[branch]=$BRANCH" -f 'source[path]=/' >/dev/null 2>&1 \
+    || echo "  (could not enable via API; if the site 404s, set Settings → Pages → Branch: $BRANCH / root)"
 fi
 
-echo -n "▸ Waiting for Pages build"
+URL="https://$OWNER.github.io/$REPO/"
+DEPLOYED=$(md5sum < dist/index.html | cut -d' ' -f1)
+echo -n "▸ Waiting for Pages to serve the new build"
 for i in $(seq 1 60); do
-  STATUS=$(gh api "repos/$OWNER/$REPO/pages/builds/latest" --jq .status 2>/dev/null || echo pending)
-  [ "$STATUS" = "built" ] && break
-  [ "$STATUS" = "errored" ] && { echo; echo "Pages build errored" >&2; exit 1; }
-  echo -n "."; sleep 5
+  LIVE=$(curl -fsS "$URL?nocache=$RANDOM" 2>/dev/null | md5sum | cut -d' ' -f1 || true)
+  [ "$LIVE" = "$DEPLOYED" ] && { echo; echo "✓ Live: $URL"; exit 0; }
+  echo -n "."; sleep 10
 done
-echo
-URL=$(gh api "repos/$OWNER/$REPO/pages" --jq .html_url)
-echo "✓ Live: $URL"
+echo; echo "Pushed, but the site isn't serving the new build yet (CDN can lag a few minutes): $URL"
