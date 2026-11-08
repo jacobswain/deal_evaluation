@@ -7,7 +7,7 @@ Single-page, password-protected screen for mineral/royalty packages: parse a bro
 - `src/parser.js`: teaser text parser (regex + heuristics).
 - `src/app.js`, `src/styles.css`, `src/index.html`: UI. Chart.js 4.4.1 and pdf.js 3.11.174 load from cdnjs.
 - `build.js`: inlines everything into `dist/plain.html` (gitignored, never committed).
-- `scripts/deploy.sh`: test → build → PageCrypt encrypt → push `index.html` to the public `deal-screen` repo → enable Pages → wait for build.
+- `scripts/deploy.sh`: test → build → PageCrypt encrypt → push `index.html` to the `gh-pages` branch (which holds nothing else) → enable Pages → wait for build. Source stays on `main`.
 
 ## Commands
 ```bash

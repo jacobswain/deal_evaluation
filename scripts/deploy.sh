@@ -9,8 +9,10 @@ if [ -z "${DEAL_SCREEN_PASSWORD:-}" ]; then
   exit 1
 fi
 OWNER="${DEAL_SCREEN_OWNER:-jacobswain}"
-REPO="${DEAL_SCREEN_REPO:-deal-screen}"
+REPO="${DEAL_SCREEN_REPO:-deal_evaluation}"
+BRANCH="${DEAL_SCREEN_BRANCH:-gh-pages}"
 DEPLOY_DIR=".deploy"
+REMOTE="https://github.com/$OWNER/$REPO.git"
 
 echo "▸ Unit tests"; npm test --silent
 echo "▸ Build";      node build.js
@@ -19,18 +21,13 @@ if grep -q -e 'DSModel' -e 'Cedar Creek Deal Screen' dist/index.html; then
   echo "Encrypted output contains plaintext. Aborting." >&2; exit 1
 fi
 
-if [ ! -d "$DEPLOY_DIR/.git" ]; then
-  rm -rf "$DEPLOY_DIR"
-  if ! gh repo view "$OWNER/$REPO" >/dev/null 2>&1; then
-    echo "▸ Creating public repo $OWNER/$REPO"
-    gh repo create "$OWNER/$REPO" --public --description "Cedar Creek Deal Screen (encrypted build)" >/dev/null
-  fi
-  git clone "https://github.com/$OWNER/$REPO.git" "$DEPLOY_DIR" 2>/dev/null || { mkdir -p "$DEPLOY_DIR"; git -C "$DEPLOY_DIR" init -q; git -C "$DEPLOY_DIR" remote add origin "https://github.com/$OWNER/$REPO.git"; }
+# The Pages branch holds ONLY the encrypted page (+ .nojekyll). Source stays on main.
+rm -rf "$DEPLOY_DIR"
+if git ls-remote --exit-code --heads "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
+  git clone -q --depth 1 --branch "$BRANCH" "$REMOTE" "$DEPLOY_DIR"
+else
+  mkdir -p "$DEPLOY_DIR"; git -C "$DEPLOY_DIR" init -q -b "$BRANCH"; git -C "$DEPLOY_DIR" remote add origin "$REMOTE"
 fi
-git -C "$DEPLOY_DIR" checkout -q -B main
-git -C "$DEPLOY_DIR" pull -q --ff-only origin main 2>/dev/null || true
-
-# The public repo holds ONLY the encrypted page (+ .nojekyll).
 find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 cp dist/index.html "$DEPLOY_DIR/index.html"
 touch "$DEPLOY_DIR/.nojekyll"
@@ -39,13 +36,13 @@ if git -C "$DEPLOY_DIR" diff --cached --quiet; then
   echo "▸ No changes to publish"
 else
   git -C "$DEPLOY_DIR" commit -q -m "Deploy $(date -u +%Y-%m-%dT%H:%MZ)"
-  git -C "$DEPLOY_DIR" push -q -u origin main
-  echo "▸ Pushed"
+  git -C "$DEPLOY_DIR" push -q -u origin "$BRANCH"
+  echo "▸ Pushed encrypted page to $BRANCH"
 fi
 
 if ! gh api "repos/$OWNER/$REPO/pages" >/dev/null 2>&1; then
-  echo "▸ Enabling GitHub Pages"
-  gh api -X POST "repos/$OWNER/$REPO/pages" -f 'source[branch]=main' -f 'source[path]=/' >/dev/null
+  echo "▸ Enabling GitHub Pages from $BRANCH"
+  gh api -X POST "repos/$OWNER/$REPO/pages" -f "source[branch]=$BRANCH" -f 'source[path]=/' >/dev/null
 fi
 
 echo -n "▸ Waiting for Pages build"
